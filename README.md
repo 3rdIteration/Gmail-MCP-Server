@@ -101,7 +101,8 @@ A Model Context Protocol (MCP) server for Gmail integration in Claude Desktop wi
    - Look for `gcp-oauth.keys.json` in the current directory or `~/.gmail-mcp/`
    - If found in current directory, copy it to `~/.gmail-mcp/`
    - Open your default browser for Google authentication
-   - Save credentials as `~/.gmail-mcp/credentials.json`
+   - Validate any custom callback URL against the `redirect_uris` configured in your OAuth client JSON
+   - Save credentials as `~/.gmail-mcp/credentials.json` with owner-only filesystem permissions when the platform supports it
 
    > **Note**: 
    > - After successful authentication, credentials are stored globally in `~/.gmail-mcp/` and can be used from any directory
@@ -198,7 +199,7 @@ npx @gongrzhe/server-gmail-autoauth-mcp auth https://gmail.gongrzhe.com/oauth2ca
    }
    ```
 
-This approach allows authentication flows to work properly in environments where localhost isn't accessible, such as containerized applications or cloud servers.
+This approach allows authentication flows to work properly in environments where localhost isn't accessible, such as containerized applications or cloud servers. The callback URL must exactly match one of the `redirect_uris` in your Google OAuth client configuration.
 
 ## OAuth Scopes
 
@@ -241,6 +242,7 @@ The server automatically filters available tools based on your authorized scopes
 | Tools | Required Scope (any) |
 |-------|---------------------|
 | `read_email`, `search_emails`, `download_attachment` | `gmail.readonly` or `gmail.modify` |
+| `get_thread`, `list_inbox_threads`, `get_inbox_with_threads`, `download_email` | `gmail.readonly` or `gmail.modify` |
 | `list_email_labels` | `gmail.readonly`, `gmail.modify`, or `gmail.labels` |
 | `send_email`, `draft_email`, `reply_all` | `gmail.modify`, `gmail.compose`, or `gmail.send` |
 | `modify_email`, `delete_email`, `batch_modify_emails`, `batch_delete_emails` | `gmail.modify` |
@@ -851,12 +853,16 @@ The server includes efficient batch processing capabilities:
 
 ## Security Notes
 
-- OAuth credentials are stored securely in your local environment (`~/.gmail-mcp/`)
+- OAuth credentials are stored in JSON files under your local environment (`~/.gmail-mcp/` by default)
+- The server applies owner-only permissions (`0700` for the config directory and `0600` for credential/token files) on platforms that support POSIX modes
 - The server uses offline access to maintain persistent authentication
 - Never share or commit your credentials to version control
 - Regularly review and revoke unused access in your Google Account settings
 - Credentials are stored globally but are only accessible by the current user
 - **Attachment files are processed locally and never stored permanently by the server**
+- Email subjects, headers, snippets, and bodies are treated as **untrusted content** in MCP responses
+- HTML-only emails are converted to text for MCP responses by stripping tags, comments, scripts, styles, and common hidden-content patterns before being returned to the LLM
+- Tool error responses redact common token/authorization values before surfacing them back to the MCP client
 
 ## Troubleshooting
 
