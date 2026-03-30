@@ -12,6 +12,7 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import http from 'http';
+import crypto from 'crypto';
 import open from 'open';
 import os from 'os';
 import {createEmailMessage, createEmailWithNodemailer} from "./utl.js";
@@ -21,6 +22,16 @@ import { parseEmailAddresses, filterOutEmail, addRePrefix, buildReferencesHeader
 import { DEFAULT_SCOPES, scopeNamesToUrls, parseScopes, validateScopes, hasScope, getAvailableScopeNames } from "./scopes.js";
 import { toolDefinitions, toMcpTools, getToolByName, SendEmailSchema, ReadEmailSchema, SearchEmailsSchema, ModifyEmailSchema, DeleteEmailSchema, BatchModifyEmailsSchema, BatchDeleteEmailsSchema, CreateLabelSchema, UpdateLabelSchema, DeleteLabelSchema, GetOrCreateLabelSchema, CreateFilterSchema, GetFilterSchema, DeleteFilterSchema, CreateFilterFromTemplateSchema, DownloadAttachmentSchema, ReplyAllSchema, GetThreadSchema, ListInboxThreadsSchema, GetInboxWithThreadsSchema, DownloadEmailSchema } from "./tools.js";
 import { gmailMessageToJson, emailToTxt, emailToHtml, EmailAttachment } from "./email-export.js";
+import {
+    EMAIL_CONTENT_SECURITY_NOTICE,
+    ensurePrivateDirectoryPermissions,
+    ensurePrivateFilePermissions,
+    extractSafeEmailBody,
+    getSafeErrorMessage,
+    renderQuotedUntrustedBlock,
+    sanitizeUntrustedText,
+    validateRedirectUri,
+} from "./security-utils.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -54,6 +65,7 @@ interface EmailContent {
 // OAuth2 configuration
 let oauth2Client: OAuth2Client;
 let authorizedScopes: string[] = DEFAULT_SCOPES;
+let oauthCallbackUrl = "http://localhost:3000/oauth2callback";
 
 /**
  * Recursively extract email body content from MIME message parts
@@ -129,20 +141,29 @@ function extractAttachments(payload: GmailMessagePart): EmailAttachment[] {
     return attachments;
 }
 
+function sanitizeHeaderValue(value: string, maxLength = 500): string {
+    return sanitizeUntrustedText(value, { singleLine: true, maxLength });
+}
+
+function sanitizeBodyValue(value: string): string {
+    return sanitizeUntrustedText(value, { singleLine: false, maxLength: 20000 });
+}
+
 async function loadCredentials() {
     try {
         // Create config directory if it doesn't exist
         if (!process.env.GMAIL_OAUTH_PATH && !process.env.GMAIL_CREDENTIALS_PATH && !fs.existsSync(CONFIG_DIR)) {
-            fs.mkdirSync(CONFIG_DIR, { recursive: true, mode: 0o700 });
+            ensurePrivateDirectoryPermissions(CONFIG_DIR);
         }
 
         // Check for OAuth keys in current directory first, then in config directory
         const localOAuthPath = path.join(process.cwd(), 'gcp-oauth.keys.json');
-        let oauthPath = OAUTH_PATH;
 
         if (fs.existsSync(localOAuthPath)) {
             // If found in current directory, copy to config directory
+            ensurePrivateDirectoryPermissions(path.dirname(OAUTH_PATH));
             fs.copyFileSync(localOAuthPath, OAUTH_PATH);
+            ensurePrivateFilePermissions(OAUTH_PATH);
             console.log('OAuth keys found in current directory, copied to global config.');
         }
 
@@ -151,6 +172,7 @@ async function loadCredentials() {
             process.exit(1);
         }
 
+        ensurePrivateFilePermissions(OAUTH_PATH);
         const keysContent = JSON.parse(fs.readFileSync(OAUTH_PATH, 'utf8'));
         const keys = keysContent.installed || keysContent.web;
 
@@ -165,15 +187,19 @@ async function loadCredentials() {
         const callbackArg = process.argv.find(arg =>
             arg.startsWith('http://') || arg.startsWith('https://')
         );
-        const callback = callbackArg || "http://localhost:3000/oauth2callback";
+        oauthCallbackUrl = validateRedirectUri(
+            callbackArg || oauthCallbackUrl,
+            Array.isArray(keys.redirect_uris) ? keys.redirect_uris : undefined
+        );
 
         oauth2Client = new OAuth2Client(
             keys.client_id,
             keys.client_secret,
-            callback
+            oauthCallbackUrl
         );
 
         if (fs.existsSync(CREDENTIALS_PATH)) {
+            ensurePrivateFilePermissions(CREDENTIALS_PATH);
             const credentials = JSON.parse(fs.readFileSync(CREDENTIALS_PATH, 'utf8'));
 
             // Credentials file structure (v1.2.0+):
@@ -192,7 +218,7 @@ async function loadCredentials() {
             }
         }
     } catch (error) {
-        console.error('Error loading credentials:', error);
+        console.error('Error loading credentials:', getSafeErrorMessage(error, 'Unable to load credentials'));
         process.exit(1);
     }
 }
@@ -205,9 +231,12 @@ async function authenticate(scopes: string[]) {
     const scopeUrls = scopeNamesToUrls(scopes);
 
     return new Promise<void>((resolve, reject) => {
+        const expectedCallback = new URL(oauthCallbackUrl);
+        const oauthState = crypto.randomBytes(32).toString('hex');
         const authUrl = oauth2Client.generateAuthUrl({
             access_type: 'offline',
             scope: scopeUrls,
+            state: oauthState,
         });
 
         console.log('Requesting scopes:', scopes.join(', '));
@@ -215,15 +244,23 @@ async function authenticate(scopes: string[]) {
         open(authUrl);
 
         server.on('request', async (req, res) => {
-            if (!req.url?.startsWith('/oauth2callback')) return;
+            if (!req.url) return;
 
-            const url = new URL(req.url, 'http://localhost:3000');
+            const url = new URL(req.url, oauthCallbackUrl);
+            if (url.pathname !== expectedCallback.pathname) {
+                res.writeHead(404);
+                res.end('Not found');
+                return;
+            }
+
             const code = url.searchParams.get('code');
+            const returnedState = url.searchParams.get('state');
 
-            if (!code) {
+            if (!code || returnedState !== oauthState) {
                 res.writeHead(400);
-                res.end('No code provided');
-                reject(new Error('No code provided'));
+                res.end('Invalid OAuth callback');
+                server.close();
+                reject(new Error(!code ? 'No code provided' : 'Invalid OAuth state'));
                 return;
             }
 
@@ -233,7 +270,9 @@ async function authenticate(scopes: string[]) {
 
                 // Store both tokens and authorized scopes for runtime filtering
                 const credentials = { tokens, scopes };
+                ensurePrivateDirectoryPermissions(path.dirname(CREDENTIALS_PATH));
                 fs.writeFileSync(CREDENTIALS_PATH, JSON.stringify(credentials, null, 2), { mode: 0o600 });
+                ensurePrivateFilePermissions(CREDENTIALS_PATH);
 
                 res.writeHead(200);
                 res.end('Authentication successful! You can close this window.');
@@ -243,7 +282,8 @@ async function authenticate(scopes: string[]) {
             } catch (error) {
                 res.writeHead(500);
                 res.end('Authentication failed');
-                reject(error);
+                server.close();
+                reject(new Error(getSafeErrorMessage(error, 'Authentication failed')));
             }
         });
     });
@@ -481,7 +521,10 @@ async function main() {
             } catch (error: any) {
                 // Log attachment-related errors for debugging
                 if (validatedArgs.attachments && validatedArgs.attachments.length > 0) {
-                    console.error(`Failed to send email with ${validatedArgs.attachments.length} attachments:`, error.message);
+                    console.error(
+                        `Failed to send email with ${validatedArgs.attachments.length} attachments:`,
+                        getSafeErrorMessage(error, 'Attachment send failed')
+                    );
                 }
                 throw error;
             }
@@ -539,22 +582,29 @@ async function main() {
                     const threadId = response.data.threadId || '';
                     const { text, html } = extractEmailContent(response.data.payload as GmailMessagePart || {});
                     const attachments = extractAttachments(response.data.payload as GmailMessagePart);
-
-                    // Use plain text content if available, otherwise use HTML content
-                    const body = text || html || '';
-                    const contentTypeNote = !text && html ?
-                        '[Note: This email is HTML-formatted. Plain text version not available.]\n\n' : '';
+                    const safeBody = extractSafeEmailBody({ text, html });
 
                     // Add attachment info to output if any are present
                     const attachmentInfo = attachments.length > 0 ?
                         `\n\nAttachments (${attachments.length}):\n` +
-                        attachments.map(a => `- ${a.filename} (${a.mimeType}, ${Math.round(a.size/1024)} KB, ID: ${a.id})`).join('\n') : '';
+                        attachments.map(a => `- ${sanitizeHeaderValue(a.filename)} (${sanitizeHeaderValue(a.mimeType)}, ${Math.round(a.size/1024)} KB, ID: ${a.id})`).join('\n') : '';
 
                     return {
                         content: [
                             {
                                 type: "text",
-                                text: `Thread ID: ${threadId}\nMessage-ID: ${rfcMessageId}\nSubject: ${subject}\nFrom: ${from}\nTo: ${to}\nDate: ${date}\n\n${contentTypeNote}${body}${attachmentInfo}`,
+                                text:
+                                    `${EMAIL_CONTENT_SECURITY_NOTICE}\n\n` +
+                                    `Thread ID: ${threadId}\n` +
+                                    `Message-ID: ${rfcMessageId}\n` +
+                                    `Subject (untrusted): ${sanitizeHeaderValue(subject)}\n` +
+                                    `From (untrusted): ${sanitizeHeaderValue(from)}\n` +
+                                    `To (untrusted): ${sanitizeHeaderValue(to)}\n` +
+                                    `Date (untrusted): ${sanitizeHeaderValue(date)}\n\n` +
+                                    `${safeBody.note ? `Note: ${safeBody.note}\n\n` : ''}` +
+                                    `--- BEGIN EMAIL BODY (UNTRUSTED CONTENT) ---\n` +
+                                    `${renderQuotedUntrustedBlock(safeBody.body)}\n` +
+                                    `--- END EMAIL BODY ---${attachmentInfo}`,
                             },
                         ],
                     };
@@ -580,9 +630,9 @@ async function main() {
                             const headers = detail.data.payload?.headers || [];
                             return {
                                 id: msg.id,
-                                subject: headers.find(h => h.name === 'Subject')?.value || '',
-                                from: headers.find(h => h.name === 'From')?.value || '',
-                                date: headers.find(h => h.name === 'Date')?.value || '',
+                                subject: sanitizeHeaderValue(headers.find(h => h.name === 'Subject')?.value || ''),
+                                from: sanitizeHeaderValue(headers.find(h => h.name === 'From')?.value || ''),
+                                date: sanitizeHeaderValue(headers.find(h => h.name === 'Date')?.value || ''),
                             };
                         })
                     );
@@ -591,9 +641,11 @@ async function main() {
                         content: [
                             {
                                 type: "text",
-                                text: results.map(r =>
-                                    `ID: ${r.id}\nSubject: ${r.subject}\nFrom: ${r.from}\nDate: ${r.date}\n`
-                                ).join('\n'),
+                                text:
+                                    `${EMAIL_CONTENT_SECURITY_NOTICE}\n\n` +
+                                    results.map(r =>
+                                        `ID: ${r.id}\nSubject (untrusted): ${r.subject}\nFrom (untrusted): ${r.from}\nDate (untrusted): ${r.date}\n`
+                                    ).join('\n'),
                             },
                         ],
                     };
@@ -656,17 +708,24 @@ async function main() {
                             path: fullPath,
                             size: stats.size,
                             messageId,
-                            subject,
-                            from,
-                            date,
-                            attachments,
+                            subject: sanitizeHeaderValue(subject),
+                            from: sanitizeHeaderValue(from),
+                            date: sanitizeHeaderValue(date),
+                            attachments: attachments.map((attachment) => ({
+                                ...attachment,
+                                filename: sanitizeHeaderValue(attachment.filename),
+                                mimeType: sanitizeHeaderValue(attachment.mimeType),
+                            })),
                         };
 
                         return {
                             content: [
                                 {
                                     type: "text",
-                                    text: JSON.stringify(result, null, 2),
+                                    text: JSON.stringify({
+                                        securityNotice: EMAIL_CONTENT_SECURITY_NOTICE,
+                                        ...result,
+                                    }, null, 2),
                                 },
                             ],
                         };
@@ -675,7 +734,7 @@ async function main() {
                             content: [
                                 {
                                     type: "text",
-                                    text: `Failed to download email: ${error.message}`,
+                                    text: `Failed to download email: ${getSafeErrorMessage(error, 'Download failed')}`,
                                 },
                             ],
                         };
@@ -798,7 +857,7 @@ async function main() {
                     if (failureCount > 0) {
                         resultText += `Failed to process: ${failureCount} messages\n\n`;
                         resultText += `Failed message IDs:\n`;
-                        resultText += failures.map(f => `- ${(f.item as string).substring(0, 16)}... (${f.error.message})`).join('\n');
+                        resultText += failures.map(f => `- ${(f.item as string).substring(0, 16)}... (${getSafeErrorMessage(f.error, 'Operation failed')})`).join('\n');
                     }
 
                     return {
@@ -844,7 +903,7 @@ async function main() {
                     if (failureCount > 0) {
                         resultText += `Failed to delete: ${failureCount} messages\n\n`;
                         resultText += `Failed message IDs:\n`;
-                        resultText += failures.map(f => `- ${(f.item as string).substring(0, 16)}... (${f.error.message})`).join('\n');
+                        resultText += failures.map(f => `- ${(f.item as string).substring(0, 16)}... (${getSafeErrorMessage(f.error, 'Operation failed')})`).join('\n');
                     }
 
                     return {
@@ -1157,7 +1216,7 @@ async function main() {
                             content: [
                                 {
                                     type: "text",
-                                    text: `Failed to download attachment: ${error.message}`,
+                                    text: `Failed to download attachment: ${getSafeErrorMessage(error, 'Download failed')}`,
                                 },
                             ],
                         };
@@ -1188,7 +1247,7 @@ async function main() {
                         let body = '';
                         if (validatedArgs.format !== 'minimal') {
                             const { text, html } = extractEmailContent(msg.payload as GmailMessagePart || {});
-                            body = text || html || '';
+                            body = extractSafeEmailBody({ text, html }).body;
                         }
 
                         // Extract attachment metadata
@@ -1214,17 +1273,17 @@ async function main() {
                         return {
                             messageId: msg.id || '',
                             threadId: msg.threadId || '',
-                            from,
-                            to,
-                            cc,
-                            bcc,
-                            subject,
-                            date,
-                            body,
+                            from: sanitizeHeaderValue(from),
+                            to: sanitizeHeaderValue(to),
+                            cc: sanitizeHeaderValue(cc),
+                            bcc: sanitizeHeaderValue(bcc),
+                            subject: sanitizeHeaderValue(subject),
+                            date: sanitizeHeaderValue(date),
+                            body: sanitizeBodyValue(body),
                             labelIds: msg.labelIds || [],
                             attachments: attachments.map(a => ({
-                                filename: a.filename,
-                                mimeType: a.mimeType,
+                                filename: sanitizeHeaderValue(a.filename),
+                                mimeType: sanitizeHeaderValue(a.mimeType),
                                 size: a.size,
                             })),
                         };
@@ -1235,6 +1294,7 @@ async function main() {
                             {
                                 type: "text",
                                 text: JSON.stringify({
+                                    securityNotice: EMAIL_CONTENT_SECURITY_NOTICE,
                                     threadId: validatedArgs.threadId,
                                     messageCount: messagesOutput.length,
                                     messages: messagesOutput,
@@ -1270,13 +1330,13 @@ async function main() {
 
                             return {
                                 threadId: thread.id || '',
-                                snippet: thread.snippet || '',
+                                snippet: sanitizeHeaderValue(thread.snippet || '', 2000),
                                 historyId: thread.historyId || '',
                                 messageCount: messages.length,
                                 latestMessage: {
-                                    from: latestHeaders.find(h => h.name === 'From')?.value || '',
-                                    subject: latestHeaders.find(h => h.name === 'Subject')?.value || '',
-                                    date: latestHeaders.find(h => h.name === 'Date')?.value || '',
+                                    from: sanitizeHeaderValue(latestHeaders.find(h => h.name === 'From')?.value || ''),
+                                    subject: sanitizeHeaderValue(latestHeaders.find(h => h.name === 'Subject')?.value || ''),
+                                    date: sanitizeHeaderValue(latestHeaders.find(h => h.name === 'Date')?.value || ''),
                                 },
                             };
                         })
@@ -1287,6 +1347,7 @@ async function main() {
                             {
                                 type: "text",
                                 text: JSON.stringify({
+                                    securityNotice: EMAIL_CONTENT_SECURITY_NOTICE,
                                     resultCount: threadDetails.length,
                                     threads: threadDetails,
                                 }, null, 2),
@@ -1322,13 +1383,13 @@ async function main() {
 
                                 return {
                                     threadId: thread.id || '',
-                                    snippet: thread.snippet || '',
+                                    snippet: sanitizeHeaderValue(thread.snippet || '', 2000),
                                     historyId: thread.historyId || '',
                                     messageCount: messages.length,
                                     latestMessage: {
-                                        from: latestHeaders.find(h => h.name === 'From')?.value || '',
-                                        subject: latestHeaders.find(h => h.name === 'Subject')?.value || '',
-                                        date: latestHeaders.find(h => h.name === 'Date')?.value || '',
+                                        from: sanitizeHeaderValue(latestHeaders.find(h => h.name === 'From')?.value || ''),
+                                        subject: sanitizeHeaderValue(latestHeaders.find(h => h.name === 'Subject')?.value || ''),
+                                        date: sanitizeHeaderValue(latestHeaders.find(h => h.name === 'Date')?.value || ''),
                                     },
                                 };
                             })
@@ -1337,11 +1398,12 @@ async function main() {
                         return {
                             content: [
                                 {
-                                    type: "text",
-                                    text: JSON.stringify({
-                                        resultCount: threadSummaries.length,
-                                        threads: threadSummaries,
-                                    }, null, 2),
+                                type: "text",
+                                text: JSON.stringify({
+                                    securityNotice: EMAIL_CONTENT_SECURITY_NOTICE,
+                                    resultCount: threadSummaries.length,
+                                    threads: threadSummaries,
+                                }, null, 2),
                                 },
                             ],
                         };
@@ -1368,7 +1430,7 @@ async function main() {
                                 const date = headers.find(h => h.name?.toLowerCase() === 'date')?.value || '';
 
                                 const { text, html } = extractEmailContent(msg.payload as GmailMessagePart || {});
-                                const body = text || html || '';
+                                const body = extractSafeEmailBody({ text, html }).body;
 
                                 // Extract attachment metadata
                                 const attachments: EmailAttachment[] = [];
@@ -1393,17 +1455,17 @@ async function main() {
                                 return {
                                     messageId: msg.id || '',
                                     threadId: msg.threadId || '',
-                                    from,
-                                    to,
-                                    cc,
-                                    bcc,
-                                    subject,
-                                    date,
-                                    body,
+                                    from: sanitizeHeaderValue(from),
+                                    to: sanitizeHeaderValue(to),
+                                    cc: sanitizeHeaderValue(cc),
+                                    bcc: sanitizeHeaderValue(bcc),
+                                    subject: sanitizeHeaderValue(subject),
+                                    date: sanitizeHeaderValue(date),
+                                    body: sanitizeBodyValue(body),
                                     labelIds: msg.labelIds || [],
                                     attachments: attachments.map(a => ({
-                                        filename: a.filename,
-                                        mimeType: a.mimeType,
+                                        filename: sanitizeHeaderValue(a.filename),
+                                        mimeType: sanitizeHeaderValue(a.mimeType),
                                         size: a.size,
                                     })),
                                 };
@@ -1422,6 +1484,7 @@ async function main() {
                             {
                                 type: "text",
                                 text: JSON.stringify({
+                                    securityNotice: EMAIL_CONTENT_SECURITY_NOTICE,
                                     resultCount: expandedThreads.length,
                                     threads: expandedThreads,
                                 }, null, 2),
@@ -1494,7 +1557,7 @@ async function main() {
                         content: [
                             {
                                 type: "text",
-                                text: `Reply-all sent successfully!\nTo: ${replyTo.join(', ')}${replyCc.length > 0 ? `\nCC: ${replyCc.join(', ')}` : ''}\nSubject: ${replySubject}\nThread ID: ${threadId}`,
+                                text: `Reply-all sent successfully!\nTo: ${replyTo.join(', ')}${replyCc.length > 0 ? `\nCC: ${replyCc.join(', ')}` : ''}\nSubject: ${sanitizeHeaderValue(replySubject)}\nThread ID: ${threadId}`,
                             },
                         ],
                     };
@@ -1508,7 +1571,7 @@ async function main() {
                 content: [
                     {
                         type: "text",
-                        text: `Error: ${error.message}`,
+                        text: `Error: ${getSafeErrorMessage(error, 'Request failed')}`,
                     },
                 ],
             };
@@ -1520,6 +1583,6 @@ async function main() {
 }
 
 main().catch((error) => {
-    console.error('Server error:', error);
+    console.error('Server error:', getSafeErrorMessage(error, 'Server failed'));
     process.exit(1);
 });

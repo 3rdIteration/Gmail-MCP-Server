@@ -12,6 +12,7 @@ dist/
 
 # Environment
 .env
+.env.*
 .env.local
 .env.*.local
 
@@ -28,6 +29,7 @@ Thumbs.db
 # Project specific
 mcp-config.json
 gcp-oauth.keys.json
+.gmail-mcp/
 .calendar-mcp/
 credentials.json
 .calendar-server-credentials.json 
