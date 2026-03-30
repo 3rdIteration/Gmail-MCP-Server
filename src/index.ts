@@ -256,11 +256,19 @@ async function authenticate(scopes: string[]) {
             const code = url.searchParams.get('code');
             const returnedState = url.searchParams.get('state');
 
-            if (!code || returnedState !== oauthState) {
+            if (!code) {
                 res.writeHead(400);
                 res.end('Invalid OAuth callback');
                 server.close();
-                reject(new Error(!code ? 'No code provided' : 'Invalid OAuth state'));
+                reject(new Error('No code provided'));
+                return;
+            }
+
+            if (returnedState !== oauthState) {
+                res.writeHead(400);
+                res.end('Invalid OAuth callback');
+                server.close();
+                reject(new Error('Invalid OAuth state'));
                 return;
             }
 

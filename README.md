@@ -241,7 +241,8 @@ The server automatically filters available tools based on your authorized scopes
 
 | Tools | Required Scope (any) |
 |-------|---------------------|
-| `read_email`, `search_emails`, `download_attachment`, `get_thread`, `list_inbox_threads`, `get_inbox_with_threads`, `download_email` | `gmail.readonly` or `gmail.modify` |
+| `read_email`, `search_emails`, `download_attachment` | `gmail.readonly` or `gmail.modify` |
+| `get_thread`, `list_inbox_threads`, `get_inbox_with_threads`, `download_email` | `gmail.readonly` or `gmail.modify` |
 | `list_email_labels` | `gmail.readonly`, `gmail.modify`, or `gmail.labels` |
 | `send_email`, `draft_email`, `reply_all` | `gmail.modify`, `gmail.compose`, or `gmail.send` |
 | `modify_email`, `delete_email`, `batch_modify_emails`, `batch_delete_emails` | `gmail.modify` |
