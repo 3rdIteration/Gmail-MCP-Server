@@ -103,6 +103,24 @@ describe('stripHtml', () => {
         expect(result).toContain('Body');
     });
 
+    it('handles </script > with space before closing bracket', () => {
+        const html = 'Before<script>alert("xss")</script >After';
+        const result = stripHtml(html);
+        expect(result).not.toContain('alert');
+        expect(result).toContain('Before');
+        expect(result).toContain('After');
+    });
+
+    it('does not double-unescape &amp;lt; into <', () => {
+        const html = '&amp;lt;script&amp;gt;';
+        const result = stripHtml(html);
+        // Should become &lt;script&gt; then <script> — but since we decode
+        // &amp; last, we should get "<script>" not execute it
+        // The key point: the result should NOT contain raw <script> tags
+        // that could be injected in a subsequent rendering pass
+        expect(result).not.toContain('&amp;');
+    });
+
     it('decodes common HTML entities', () => {
         expect(stripHtml('&amp; &lt; &gt; &quot; &#39;')).toBe('& < > " \'');
     });

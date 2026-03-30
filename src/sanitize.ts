@@ -26,13 +26,24 @@ export function stripHtml(html: string): string {
 
     let text = html;
 
-    // 1. Remove <script>, <style>, and <head> blocks (including content)
-    text = text.replace(/<script[\s\S]*?<\/script>/gi, '');
-    text = text.replace(/<style[\s\S]*?<\/style>/gi, '');
-    text = text.replace(/<head[\s\S]*?<\/head>/gi, '');
+    // 1. Remove <script>, <style>, and <head> blocks (including content).
+    //    Use \s* before > in closing tags to handle "</script >" variants.
+    //    Loop to handle any nested or reconstructed tags after prior removals.
+    let prev = '';
+    while (prev !== text) {
+        prev = text;
+        text = text.replace(/<script\b[\s\S]*?<\/script\s*>/gi, '');
+        text = text.replace(/<style\b[\s\S]*?<\/style\s*>/gi, '');
+        text = text.replace(/<head\b[\s\S]*?<\/head\s*>/gi, '');
+    }
 
-    // 2. Remove HTML comments (<!-- ... -->), including multi-line
-    text = text.replace(/<!--[\s\S]*?-->/g, '');
+    // 2. Remove HTML comments (<!-- ... -->), including multi-line.
+    //    Loop to handle nested/reconstructed comment markers.
+    prev = '';
+    while (prev !== text) {
+        prev = text;
+        text = text.replace(/<!--[\s\S]*?-->/g, '');
+    }
 
     // 3. Remove elements whose inline style hides content from humans.
     //    This targets the most common prompt-injection attack vectors:
@@ -78,12 +89,13 @@ export function stripHtml(html: string): string {
     text = text.replace(/<br\s*\/?>/gi, '\n');
     text = text.replace(/<\/?(p|div|tr|li|h[1-6]|blockquote|pre)\b[^>]*>/gi, '\n');
 
-    // 5. Strip all remaining HTML tags
+    // 5. Strip all remaining HTML tags (final pass removes anything left)
     text = text.replace(/<[^>]+>/g, '');
 
-    // 6. Decode common HTML entities
+    // 6. Decode common HTML entities.
+    //    Decode &amp; LAST so that sequences like "&amp;lt;" don't become "&lt;"
+    //    and then get double-decoded into "<".
     text = text.replace(/&nbsp;/gi, ' ');
-    text = text.replace(/&amp;/gi, '&');
     text = text.replace(/&lt;/gi, '<');
     text = text.replace(/&gt;/gi, '>');
     text = text.replace(/&quot;/gi, '"');
@@ -91,6 +103,8 @@ export function stripHtml(html: string): string {
     text = text.replace(/&#x27;/gi, "'");
     text = text.replace(/&#(\d+);/g, (_, code) => String.fromCharCode(parseInt(code, 10)));
     text = text.replace(/&#x([0-9a-fA-F]+);/g, (_, code) => String.fromCharCode(parseInt(code, 16)));
+    // Decode &amp; last to prevent double-unescaping
+    text = text.replace(/&amp;/gi, '&');
 
     // 7. Collapse whitespace: multiple blank lines → two newlines, trim lines
     text = text.replace(/[ \t]+/g, ' ');
