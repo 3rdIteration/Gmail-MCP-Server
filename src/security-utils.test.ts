@@ -89,6 +89,17 @@ describe("security-utils auth and error hardening", () => {
   });
 
   it("applies private permissions to created config directories and files", () => {
+    if (process.platform === "win32") {
+      const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "gmail-mcp-security-"));
+      const dirPath = path.join(tmpRoot, "config");
+      const filePath = path.join(dirPath, "credentials.json");
+
+      expect(() => ensurePrivateDirectoryPermissions(dirPath)).not.toThrow();
+      fs.writeFileSync(filePath, "{}");
+      expect(() => ensurePrivateFilePermissions(filePath)).not.toThrow();
+      return;
+    }
+
     const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "gmail-mcp-security-"));
     const dirPath = path.join(tmpRoot, "config");
     const filePath = path.join(dirPath, "credentials.json");

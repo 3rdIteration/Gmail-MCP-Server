@@ -149,6 +149,16 @@ function sanitizeBodyValue(value: string): string {
     return sanitizeUntrustedText(value, { singleLine: false, maxLength: 20000 });
 }
 
+function formatAttachmentSize(sizeInBytes: number): string {
+    if (sizeInBytes <= 0) {
+        return '0 bytes';
+    }
+    if (sizeInBytes < 1024) {
+        return `${sizeInBytes} bytes`;
+    }
+    return `${Math.max(1, Math.round(sizeInBytes / 1024))} KB`;
+}
+
 async function loadCredentials() {
     try {
         // Create config directory if it doesn't exist
@@ -231,7 +241,7 @@ async function authenticate(scopes: string[]) {
     const scopeUrls = scopeNamesToUrls(scopes);
 
     return new Promise<void>((resolve, reject) => {
-        const expectedCallback = new URL(oauthCallbackUrl);
+        const expectedCallbackUrl = new URL(oauthCallbackUrl);
         const oauthState = crypto.randomBytes(32).toString('hex');
         const authUrl = oauth2Client.generateAuthUrl({
             access_type: 'offline',
@@ -247,7 +257,7 @@ async function authenticate(scopes: string[]) {
             if (!req.url) return;
 
             const url = new URL(req.url, oauthCallbackUrl);
-            if (url.pathname !== expectedCallback.pathname) {
+            if (url.pathname !== expectedCallbackUrl.pathname) {
                 res.writeHead(404);
                 res.end('Not found');
                 return;
@@ -595,7 +605,12 @@ async function main() {
                     // Add attachment info to output if any are present
                     const attachmentInfo = attachments.length > 0 ?
                         `\n\nAttachments (${attachments.length}):\n` +
-                        attachments.map(a => `- ${sanitizeHeaderValue(a.filename)} (${sanitizeHeaderValue(a.mimeType)}, ${Math.round(a.size/1024)} KB, ID: ${a.id})`).join('\n') : '';
+                        attachments
+                            .map(a =>
+                                `- ${sanitizeHeaderValue(a.filename)} ` +
+                                `(${sanitizeHeaderValue(a.mimeType)}, ${formatAttachmentSize(a.size)}, ID: ${a.id})`
+                            )
+                            .join('\n') : '';
 
                     return {
                         content: [
@@ -720,9 +735,10 @@ async function main() {
                             from: sanitizeHeaderValue(from),
                             date: sanitizeHeaderValue(date),
                             attachments: attachments.map((attachment) => ({
-                                ...attachment,
+                                id: attachment.id,
                                 filename: sanitizeHeaderValue(attachment.filename),
                                 mimeType: sanitizeHeaderValue(attachment.mimeType),
+                                size: attachment.size,
                             })),
                         };
 
