@@ -27,14 +27,14 @@ export function stripHtml(html: string): string {
     let text = html;
 
     // 1. Remove <script>, <style>, and <head> blocks (including content).
-    //    Use \s* before > in closing tags to handle "</script >" variants.
+    //    Use [^>]* in closing tags to handle "</script foo>" and "</script\t\n>" variants.
     //    Loop to handle any nested or reconstructed tags after prior removals.
     let prev = '';
     while (prev !== text) {
         prev = text;
-        text = text.replace(/<script\b[\s\S]*?<\/script\s*>/gi, '');
-        text = text.replace(/<style\b[\s\S]*?<\/style\s*>/gi, '');
-        text = text.replace(/<head\b[\s\S]*?<\/head\s*>/gi, '');
+        text = text.replace(/<script\b[\s\S]*?<\/script[^>]*>/gi, '');
+        text = text.replace(/<style\b[\s\S]*?<\/style[^>]*>/gi, '');
+        text = text.replace(/<head\b[\s\S]*?<\/head[^>]*>/gi, '');
     }
 
     // 2. Remove HTML comments (<!-- ... -->), including multi-line.
@@ -89,8 +89,12 @@ export function stripHtml(html: string): string {
     text = text.replace(/<br\s*\/?>/gi, '\n');
     text = text.replace(/<\/?(p|div|tr|li|h[1-6]|blockquote|pre)\b[^>]*>/gi, '\n');
 
-    // 5. Strip all remaining HTML tags (final pass removes anything left)
-    text = text.replace(/<[^>]+>/g, '');
+    // 5. Strip all remaining HTML tags (final pass removes anything left).
+    //    Also remove malformed/unclosed tags and any residual < or > brackets
+    //    that could form tag-like structures after entity decoding.
+    text = text.replace(/<[^>]*>/g, '');
+    // Remove any remaining unclosed angle-bracket fragments (e.g. "<script" without ">")
+    text = text.replace(/<\/?[a-z][a-z0-9]*/gi, '');
 
     // 6. Decode common HTML entities.
     //    Decode &amp; LAST so that sequences like "&amp;lt;" don't become "&lt;"
