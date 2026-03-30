@@ -32,3 +32,6 @@ gcp-oauth.keys.json
 credentials.json
 .calendar-server-credentials.json 
 .gcp-oauth.keys.json
+.gmail-mcp/
+*.pem
+*.key

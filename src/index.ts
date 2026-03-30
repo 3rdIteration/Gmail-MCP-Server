@@ -21,6 +21,7 @@ import { parseEmailAddresses, filterOutEmail, addRePrefix, buildReferencesHeader
 import { DEFAULT_SCOPES, scopeNamesToUrls, parseScopes, validateScopes, hasScope, getAvailableScopeNames } from "./scopes.js";
 import { toolDefinitions, toMcpTools, getToolByName, SendEmailSchema, ReadEmailSchema, SearchEmailsSchema, ModifyEmailSchema, DeleteEmailSchema, BatchModifyEmailsSchema, BatchDeleteEmailsSchema, CreateLabelSchema, UpdateLabelSchema, DeleteLabelSchema, GetOrCreateLabelSchema, CreateFilterSchema, GetFilterSchema, DeleteFilterSchema, CreateFilterFromTemplateSchema, DownloadAttachmentSchema, ReplyAllSchema, GetThreadSchema, ListInboxThreadsSchema, GetInboxWithThreadsSchema, DownloadEmailSchema } from "./tools.js";
 import { gmailMessageToJson, emailToTxt, emailToHtml, EmailAttachment } from "./email-export.js";
+import { stripHtml, frameEmailContent, sanitizeErrorMessage } from "./sanitize.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -165,7 +166,23 @@ async function loadCredentials() {
         const callbackArg = process.argv.find(arg =>
             arg.startsWith('http://') || arg.startsWith('https://')
         );
+        // Validate the callback URI to prevent open-redirect attacks.
+        // Only allow localhost/127.0.0.1 origins for the OAuth redirect.
         const callback = callbackArg || "http://localhost:3000/oauth2callback";
+        try {
+            const callbackUrl = new URL(callback);
+            // Strict hostname check: URL.hostname returns the parsed hostname,
+            // which cannot contain subdomains like "localhost.evil.com" when
+            // the parsed hostname is compared with strict equality via includes().
+            const allowedHosts = ['localhost', '127.0.0.1', '[::1]'];
+            if (!allowedHosts.includes(callbackUrl.hostname)) {
+                console.error('Error: OAuth redirect URI must use localhost (localhost, 127.0.0.1, or [::1]).');
+                process.exit(1);
+            }
+        } catch {
+            console.error('Error: Invalid OAuth redirect URI.');
+            process.exit(1);
+        }
 
         oauth2Client = new OAuth2Client(
             keys.client_id,
@@ -192,7 +209,13 @@ async function loadCredentials() {
             }
         }
     } catch (error) {
-        console.error('Error loading credentials:', error);
+        // Provide enough context for troubleshooting without leaking credentials.
+        const reason = error instanceof SyntaxError
+            ? 'Invalid JSON format in credential files.'
+            : error instanceof Error && error.message.includes('EACCES')
+            ? 'Permission denied reading credential files.'
+            : 'Failed to load or parse credential files.';
+        console.error(`Error loading credentials: ${reason}`);
         process.exit(1);
     }
 }
@@ -540,21 +563,30 @@ async function main() {
                     const { text, html } = extractEmailContent(response.data.payload as GmailMessagePart || {});
                     const attachments = extractAttachments(response.data.payload as GmailMessagePart);
 
-                    // Use plain text content if available, otherwise use HTML content
-                    const body = text || html || '';
+                    // Use plain text content if available; for HTML-only emails,
+                    // strip hidden/malicious HTML to mitigate prompt injection via
+                    // invisible text (zero-font, display:none, HTML comments, etc.).
+                    const body = text || (html ? stripHtml(html) : '');
                     const contentTypeNote = !text && html ?
-                        '[Note: This email is HTML-formatted. Plain text version not available.]\n\n' : '';
+                        '[Note: This email is HTML-formatted. Content has been converted to plain text.]\n\n' : '';
 
                     // Add attachment info to output if any are present
                     const attachmentInfo = attachments.length > 0 ?
                         `\n\nAttachments (${attachments.length}):\n` +
                         attachments.map(a => `- ${a.filename} (${a.mimeType}, ${Math.round(a.size/1024)} KB, ID: ${a.id})`).join('\n') : '';
 
+                    // Frame email content with clear boundaries so the LLM can
+                    // distinguish untrusted email data from system instructions.
+                    const emailBody = frameEmailContent(
+                        'CONTENT',
+                        `Thread ID: ${threadId}\nMessage-ID: ${rfcMessageId}\nSubject: ${subject}\nFrom: ${from}\nTo: ${to}\nDate: ${date}\n\n${contentTypeNote}${body}${attachmentInfo}`
+                    );
+
                     return {
                         content: [
                             {
                                 type: "text",
-                                text: `Thread ID: ${threadId}\nMessage-ID: ${rfcMessageId}\nSubject: ${subject}\nFrom: ${from}\nTo: ${to}\nDate: ${date}\n\n${contentTypeNote}${body}${attachmentInfo}`,
+                                text: emailBody,
                             },
                         ],
                     };
@@ -1184,11 +1216,11 @@ async function main() {
                         const bcc = headers.find(h => h.name?.toLowerCase() === 'bcc')?.value || '';
                         const date = headers.find(h => h.name?.toLowerCase() === 'date')?.value || '';
 
-                        // Extract body content
+                        // Extract body content; strip hidden HTML for prompt injection defense
                         let body = '';
                         if (validatedArgs.format !== 'minimal') {
                             const { text, html } = extractEmailContent(msg.payload as GmailMessagePart || {});
-                            body = text || html || '';
+                            body = text || (html ? stripHtml(html) : '');
                         }
 
                         // Extract attachment metadata
@@ -1368,7 +1400,7 @@ async function main() {
                                 const date = headers.find(h => h.name?.toLowerCase() === 'date')?.value || '';
 
                                 const { text, html } = extractEmailContent(msg.payload as GmailMessagePart || {});
-                                const body = text || html || '';
+                                const body = text || (html ? stripHtml(html) : '');
 
                                 // Extract attachment metadata
                                 const attachments: EmailAttachment[] = [];
@@ -1508,7 +1540,7 @@ async function main() {
                 content: [
                     {
                         type: "text",
-                        text: `Error: ${error.message}`,
+                        text: `Error: ${sanitizeErrorMessage(error.message)}`,
                     },
                 ],
             };
@@ -1520,6 +1552,6 @@ async function main() {
 }
 
 main().catch((error) => {
-    console.error('Server error:', error);
+    console.error('Server error:', error instanceof Error ? error.message : 'Unknown error');
     process.exit(1);
 });

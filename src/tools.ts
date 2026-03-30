@@ -21,8 +21,8 @@ export const ReadEmailSchema = z.object({
 });
 
 export const SearchEmailsSchema = z.object({
-  query: z.string().describe("Gmail search query (e.g., 'from:example@gmail.com')"),
-  maxResults: z.number().optional().describe("Maximum number of results to return"),
+  query: z.string().max(2000).describe("Gmail search query (e.g., 'from:example@gmail.com')"),
+  maxResults: z.number().min(1).max(500).optional().describe("Maximum number of results to return (max 500)"),
 });
 
 export const ModifyEmailSchema = z.object({
@@ -62,15 +62,15 @@ export const GetOrCreateLabelSchema = z.object({
 }).describe("Gets an existing label by name or creates it if it doesn't exist");
 
 export const BatchModifyEmailsSchema = z.object({
-  messageIds: z.array(z.string()).describe("List of message IDs to modify"),
+  messageIds: z.array(z.string()).max(1000).describe("List of message IDs to modify (max 1000)"),
   addLabelIds: z.array(z.string()).optional().describe("List of label IDs to add to all messages"),
   removeLabelIds: z.array(z.string()).optional().describe("List of label IDs to remove from all messages"),
-  batchSize: z.number().optional().default(50).describe("Number of messages to process in each batch (default: 50)"),
+  batchSize: z.number().min(1).max(100).optional().default(50).describe("Number of messages to process in each batch (default: 50, max: 100)"),
 });
 
 export const BatchDeleteEmailsSchema = z.object({
-  messageIds: z.array(z.string()).describe("List of message IDs to delete"),
-  batchSize: z.number().optional().default(50).describe("Number of messages to process in each batch (default: 50)"),
+  messageIds: z.array(z.string()).max(1000).describe("List of message IDs to delete (max 1000)"),
+  batchSize: z.number().min(1).max(100).optional().default(50).describe("Number of messages to process in each batch (default: 50, max: 100)"),
 });
 
 export const CreateFilterSchema = z.object({
@@ -138,13 +138,13 @@ export const GetThreadSchema = z.object({
 });
 
 export const ListInboxThreadsSchema = z.object({
-  query: z.string().optional().default('in:inbox').describe("Gmail search query (default: 'in:inbox')"),
-  maxResults: z.number().optional().default(50).describe("Maximum number of threads to return (default: 50)"),
+  query: z.string().max(2000).optional().default('in:inbox').describe("Gmail search query (default: 'in:inbox')"),
+  maxResults: z.number().min(1).max(500).optional().default(50).describe("Maximum number of threads to return (default: 50, max: 500)"),
 });
 
 export const GetInboxWithThreadsSchema = z.object({
-  query: z.string().optional().default('in:inbox').describe("Gmail search query (default: 'in:inbox')"),
-  maxResults: z.number().optional().default(50).describe("Maximum number of threads to return (default: 50)"),
+  query: z.string().max(2000).optional().default('in:inbox').describe("Gmail search query (default: 'in:inbox')"),
+  maxResults: z.number().min(1).max(500).optional().default(50).describe("Maximum number of threads to return (default: 50, max: 500)"),
   expandThreads: z.boolean().optional().default(true).describe("Whether to fetch full thread content for each thread (default: true)"),
 });
 
