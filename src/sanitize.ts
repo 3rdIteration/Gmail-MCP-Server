@@ -127,9 +127,12 @@ export function truncate(text: string, maxLength: number): string {
 export function sanitizeErrorMessage(message: string): string {
     let safe = message;
 
-    // Strip absolute file paths (Unix and Windows)
+    // Strip absolute file paths (Unix and Windows) — at least 2 segments
     safe = safe.replace(/(?:\/[\w.-]+){2,}/g, '[path]');
-    safe = safe.replace(/[A-Z]:\\[\w\\.-]+/g, '[path]');
+    safe = safe.replace(/[A-Z]:\\[\w\\. -]+/g, '[path]');
+
+    // Strip relative paths that reveal directory structure (../ or ./ prefixed)
+    safe = safe.replace(/(?:\.\.?\/[\w.-]+)+/g, '[path]');
 
     // Strip long base64 or token-like strings (40+ chars of base64 alphabet)
     safe = safe.replace(/[A-Za-z0-9+/=_-]{40,}/g, '[redacted]');

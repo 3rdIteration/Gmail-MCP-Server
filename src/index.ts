@@ -171,9 +171,12 @@ async function loadCredentials() {
         const callback = callbackArg || "http://localhost:3000/oauth2callback";
         try {
             const callbackUrl = new URL(callback);
+            // Strict hostname check: URL.hostname returns the parsed hostname,
+            // which cannot contain subdomains like "localhost.evil.com" when
+            // the parsed hostname is compared with strict equality via includes().
             const allowedHosts = ['localhost', '127.0.0.1', '[::1]'];
             if (!allowedHosts.includes(callbackUrl.hostname)) {
-                console.error(`Error: OAuth redirect URI must use localhost. Got: ${callbackUrl.hostname}`);
+                console.error('Error: OAuth redirect URI must use localhost (localhost, 127.0.0.1, or [::1]).');
                 process.exit(1);
             }
         } catch {
@@ -206,7 +209,13 @@ async function loadCredentials() {
             }
         }
     } catch (error) {
-        console.error('Error loading credentials: Failed to load or parse credential files.');
+        // Provide enough context for troubleshooting without leaking credentials.
+        const reason = error instanceof SyntaxError
+            ? 'Invalid JSON format in credential files.'
+            : error instanceof Error && error.message.includes('EACCES')
+            ? 'Permission denied reading credential files.'
+            : 'Failed to load or parse credential files.';
+        console.error(`Error loading credentials: ${reason}`);
         process.exit(1);
     }
 }

@@ -214,6 +214,13 @@ describe('sanitizeErrorMessage', () => {
         expect(result).toContain('Bearer [redacted]');
     });
 
+    it('strips relative paths', () => {
+        const msg = 'Error: file not found at ../config/credentials.json';
+        const result = sanitizeErrorMessage(msg);
+        expect(result).not.toContain('../config');
+        expect(result).toContain('[path]');
+    });
+
     it('leaves normal error messages intact', () => {
         const msg = 'Invalid email address format';
         expect(sanitizeErrorMessage(msg)).toBe(msg);
